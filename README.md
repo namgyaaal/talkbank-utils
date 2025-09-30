@@ -1,7 +1,7 @@
 # Talkbank Utils 
 
-Python utility library for handling text and audio of Talkbank `.cha` files.
+Python utility library for handling text and audio of Talkbank `.cha` files made for personal use. 
 
-Used for purpose of diarization and speech-to-text.
+Used on ASR tasks (voice recognition, diarization and speech-to-text) for libraries such as `pyannote-audio` and `nemo_toolkit[asr]`. Because of this, it ignores a lot of other data included in .cha files. 
 
-Note that this doesn't do anything with syntax or other complex features. Consider using `pylangacq` for this purpose. 
+If you want those features, consider using other libraries (such as `pylangacq`).

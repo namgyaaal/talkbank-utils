@@ -1,188 +1,168 @@
 from pyannote.core import Annotation, Segment
-import regex as re 
+import regex as re
 from pathlib import Path
 from typing import Self
+import json
 
-TIMESTAMP_BRACE = '\x15'
+from formatter import Formatter
 
-re_has_speaker = re.compile(r'\*[A-Z]+:')
-re_timestamp = re.compile(rf'{TIMESTAMP_BRACE}([0-9]+_[0-9]+){TIMESTAMP_BRACE}')
-re_nonalphanumpunc = re.compile("^[A-Za-z0-9 _.,!\"'/$]*")
-re_nonverbal = re.compile(r"&=[a-zA-Z]+")
-re_fillers = re.compile(r"&-[a-zA-Z]+")
-re_nonwords = re.compile(r"&~[a-zA-Z]+")
-re_incomplete = re.compile(r"\w*\(\w+\)\w*")
-re_replacement = re.compile(r"\[: .*\]")
+TIMESTAMP_BRACE = "\x15"
+
+re_has_speaker = re.compile(r"\*[A-Z]+:")
+re_timestamp = re.compile(rf"{TIMESTAMP_BRACE}([0-9]+_[0-9]+){TIMESTAMP_BRACE}")
+
 
 class Transcription:
-    """Container for .cha with helper functions""" 
+    """Container for .cha with helper functions and data for ASR tasks"""
 
+    def __init__(self, raw_transcription: str, formatter: Formatter = Formatter()):
+        self.formatter = formatter
+        self.speakers = set()
+        self.annotation = Annotation()
+        self.utterances = []
+        self.duration = 0
 
-    """
-        remove_unknown: bool, optional 
-            Remove 'xxx' 
-            Default is False 
-        remove_unintelligible: bool, optional
-            Remove 'yyy' 
-            Default is False 
-        remove_nonverbal: bool, optional 
-            Remove '&=action'
-            Default is True
-        remove_fillers: bool, optional
-            Remove '&-filler'
-            Default is True
-        remove_nonwords: bool, optional 
-            Remove '&~nonword'
-            Default is True
-        remove_incomplete: bool, optional
-            Remove '(wo)rds'
-            Default is True 
-        remove_replacement: bool, optional 
-            Remove '[: replacement]'
-            Default is True 
-
-
-        discard_empty: bool, optional 
-            After removals, discard if utterance is "."
-            Default is False
-
-        unknown_replacement: str, optional 
-            What to replace 'xxx' with if remove_unknown is false 
-            Default is '<UNKNOWN>'
-        unintelligible_replacement: str, optional 
-            What to replace 'y' with if remove_unintelligible is false 
-            Default is '<UNINTELLIGIBLE>'
-    """
-    def __init__(self, raw_transcription: str, **kwargs):
-        kwargs.setdefault('remove_unknown', False)
-        kwargs.setdefault('remove_unintelligible', False)
-        kwargs.setdefault('remove_nonverbal', True)
-        kwargs.setdefault('remove_fillers', True)
-        kwargs.setdefault('remove_nonwords', True)
-        kwargs.setdefault('remove_incomplete', True)
-        kwargs.setdefault('remove_replacement', True)
-
-        kwargs.setdefault('discard_empty', False)
-
-        kwargs.setdefault('unknown_replacement', '<UNKNOWN>')
-        kwargs.setdefault('unintelligible_replacement', '<UNINTELLIGIBLE>')
-        self.__dict__.update(kwargs)
-
-        self.speakers = set() 
-        self.annotation = Annotation() 
-
-        lines = raw_transcription.split('\n')
-
-        for line in lines: 
+        lines = raw_transcription.split("\n")
+        for line in lines:
             self._parse_line(line)
 
     @classmethod
-    def from_path(cls, path: str) -> Self: 
-        f_in = open(path, 'r')
-        raw_text = f_in.read() 
+    def from_path(cls, filepath: str) -> Self:
+        """
+        Load transcription from a .cha file
+        """
+        f_in = open(filepath, "r")
+        raw_text = f_in.read()
         f_in.close()
-        return Transcription(raw_text)
+        return cls(raw_text)
 
-
-    """ 
-        Internal util function for parsing line 
-        Only goes through @Participants line and any line with speaker format  
-
-        - Adds segments to annotation 
-        - Modifies speakers 
-    """
     def _parse_line(self, line: str):
-        if line.startswith("@Participants:"): 
-            line = line.removeprefix("@Participants:").strip()
-            # TODO: Handle optional speaker matching here 
-        elif re_has_speaker.match(line):
-            lines = line.split('\t')
+        """
+        Internal util function for parsing line
+        Only goes through @Participants line and any line with speaker format
 
-            speaker = lines[0][1 : -1]
+        - Adds segments to annotation
+        - Modifies speakers
+        """
+        if line.startswith("@Participants:"):
+            line = line.removeprefix("@Participants:").strip()
+            # TODO: Handle optional speaker matching here
+        elif re_has_speaker.match(line):
+            lines = line.split("\t")
+
+            speaker = lines[0][1:-1]
             timestamp = re_timestamp.search(lines[1])
             utterance = re_timestamp.sub("", lines[1])
-            # Only care if it has timestamps. 
-            if timestamp is None: 
-                return 
+            # Only care if it has timestamps.
+            if timestamp is None:
+                return
             timestamp = timestamp.group(1)
 
             self.speakers.add(speaker)
 
-            timestamps = timestamp.split('_')
+            timestamps = timestamp.split("_")
             start = float(timestamps[0]) / 1_000
             end = float(timestamps[1]) / 1_000
 
-            self.annotation[Segment(start, end)] = speaker
+            segment = Segment(start, end)
 
-            # TODO: Properly handle dialogue 
-            utterance = self._clean_utterance(utterance)
+            utterance = self.formatter.format_line(utterance)
 
-    def _clean_utterance(self, line: str) -> str|None: 
-        line = line.replace('xxx', '' if self.remove_unknown\
-                     else self.unknown_replacement) 
-        line = line.replace('yyy', '' if self.remove_unintelligible\
-                     else self.unintelligible_replacement)
+            self.utterances.append((speaker, segment, utterance))
+            self.annotation[segment] = speaker
 
-        if self.remove_nonverbal: 
-            line = re_nonverbal.sub('', line)
+            self.duration = max(self.duration, end)
 
-        if self.remove_fillers: 
-            line = re_fillers.sub('', line)
-
-        if self.remove_nonwords:
-            line = re_nonwords.sub('', line)
-
-        if self.remove_incomplete: 
-            line = re_incomplete.sub('', line)
-
-        if self.remove_replacement:
-            line = re_replacement.sub('', line)
-        
-        line = line.strip() 
-        if line == "." and self.discard_empty:
-            return None 
-
-        return line 
-
-    def to_rttm(self): 
+    def to_rttm(self) -> str:
+        """
+        Return rttm-formatted text to be written to file
+        """
         return self.annotation.to_rttm()
 
-class Reader: 
+    def to_manifest(
+        self, audio_filepath: str, rttm_filepath: str, should_exist: bool = False
+    ) -> dict:
+        """
+        Return list of dictionaries corresponding to a line of a manifest files used in
+        NeMo-asr tasks to be written to a .jsonl file.
+        """
+        if should_exist:
+            if not Path(audio_filepath).exists():
+                raise ValueError(
+                    f".wav file {audio_filepath} for to_manifest() must exist."
+                )
+            if not Path(rttm_filepath).exists():
+                raise ValueError(
+                    f".rttm file {rttm_filepath} for to_manifest() must exist"
+                )
+        """
+            Format: 
+                {'audio_filepath', 'text', 'offset', 'duration', 'num_speakers', 'rttm_filepath'}
+        """
+        return {
+            "audio_filepath": str(audio_filepath),
+            "text": "-",
+            "offset": 0,
+            "duration": int(self.duration),
+            "num_speakers": len(self.speakers),
+            "rttm_filepath": str(rttm_filepath),
+        }
+
+
+class Reader:
     """Reader class is used for loading a directory of .cha files to access"""
 
-    def __init__(self, transcriptions: dict[str, Transcription]): 
-        if len(transcriptions) == 0: 
+    def __init__(self, transcriptions: dict[str, Transcription]):
+        if len(transcriptions) == 0:
             raise ValueError("Can't pass empty transcriptions to Reader")
 
         self.transcriptions = transcriptions
 
     @classmethod
-    def from_dir(cls, dir: str): 
+    def from_dir(cls, dir: str):
+        """
+        Load a Reader from a recursive directory of .cha files.
+        """
         transcriptions = {}
-        for path in Path(dir).rglob('*.cha'):
-            base_dir = Path(*path.parts[1 :]).with_suffix('')
+        for path in Path(dir).rglob("*.cha"):
+            base_dir = Path(*path.parts[1:]).with_suffix("")
             transcription = Transcription.from_path(path)
             transcriptions[base_dir] = transcription
-        return Reader(transcriptions)
-    """ 
-        Dump transcriptions as rttms into the specified folder.
-    """
-    def dump(self, path: str):
-        for base_dir, transcription in self.transcriptions.items(): 
-            out_path = path / base_dir.with_suffix('.rttm')
-            out_path.parent.mkdir(parents = True, exist_ok = True)
+        return cls(transcriptions)
 
-            with open(out_path, 'w') as f_out:
+    def dump(
+        self, rttm_dir: str, wav_dir: str, manifest_filepath: str, skip: bool = True
+    ):
+        """
+        Dump transcriptions as a folder of .rttms and a manifest .jsonl file
+
+        Assumes that directory of .wav files exists in 'wav_dir' that mirrors original structure of .cha files.
+        """
+        if not manifest_filepath.endswith(".jsonl"):
+            raise ValueError("Manifest file should end with .jsonl")
+
+        Path(manifest_filepath).parent.mkdir(parents=True, exist_ok=True)
+        manifest_file = open(manifest_filepath, "w")
+
+        for base_dir, transcription in self.transcriptions.items():
+            audio_filepath = wav_dir / base_dir.with_suffix(".wav")
+
+            if not Path.exists(audio_filepath):
+                if skip:
+                    continue
+                raise ValueError(
+                    f"Can't find audio file {audio_filepath} when saving generating .rttm and manifest files"
+                )
+
+            rttm_filepath = rttm_dir / base_dir.with_suffix(".rttm")
+            rttm_filepath.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(rttm_filepath, "w") as f_out:
                 f_out.write(transcription.to_rttm())
 
-if __name__ == "__main__":
-
-    # Testing 
-    """
-    with open("VanDam5min_transcript/BE05/Be05_021023a.cha") as f_in:
-        transcript = f_in.read()
-    Transcription(transcript)
-
-    reader = Reader.from_dir('VanDam5min_transcript')
-    reader.dump('out')
-    """
+            manifest = transcription.to_manifest(
+                audio_filepath, rttm_filepath, should_exist=True
+            )
+            json.dump(manifest, manifest_file)
+            manifest_file.write("\n")
+        manifest_file.close()
