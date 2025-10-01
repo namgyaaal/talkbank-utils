@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Self
 import json
 
-from formatter import Formatter
+from .formatter import Formatter
 
 TIMESTAMP_BRACE = "\x15"
 
@@ -15,10 +15,12 @@ re_timestamp = re.compile(rf"{TIMESTAMP_BRACE}([0-9]+_[0-9]+){TIMESTAMP_BRACE}")
 class Transcription:
     """Container for .cha with helper functions and data for ASR tasks"""
 
-    def __init__(self, raw_transcription: str, formatter: Formatter = Formatter()):
+    def __init__(
+        self, name: str, raw_transcription: str, formatter: Formatter = Formatter()
+    ):
         self.formatter = formatter
         self.speakers = set()
-        self.annotation = Annotation()
+        self.annotation = Annotation(uri=name)
         self.utterances = []
         self.duration = 0
 
@@ -34,7 +36,11 @@ class Transcription:
         f_in = open(filepath, "r")
         raw_text = f_in.read()
         f_in.close()
-        return cls(raw_text)
+
+        # Get basename since rttm needs it
+        base = Path(filepath).parts[-1].removesuffix(".cha")
+
+        return cls(base, raw_text)
 
     def _parse_line(self, line: str):
         """
@@ -79,12 +85,16 @@ class Transcription:
         """
         return self.annotation.to_rttm()
 
-    def to_manifest(
+    def to_manifest_entry(
         self, audio_filepath: str, rttm_filepath: str, should_exist: bool = False
     ) -> dict:
         """
-        Return list of dictionaries corresponding to a line of a manifest files used in
+        Return dictionary corresponding to a line of a manifest files used in
         NeMo-asr tasks to be written to a .jsonl file.
+
+        :param audio_filepath: Path to the audio file for this transcription
+        :param rttm_filepath: Path to the rttm file for this transcription
+        :param should_exist: Throws an error if true and neither the audio or the rttm file exists.
         """
         if should_exist:
             if not Path(audio_filepath).exists():
@@ -96,7 +106,7 @@ class Transcription:
                     f".rttm file {rttm_filepath} for to_manifest() must exist"
                 )
         """
-            Format: 
+            Format used for diarization: 
                 {'audio_filepath', 'text', 'offset', 'duration', 'num_speakers', 'rttm_filepath'}
         """
         return {
@@ -119,50 +129,72 @@ class Reader:
         self.transcriptions = transcriptions
 
     @classmethod
-    def from_dir(cls, dir: str):
+    def from_dir(cls, cha_dir: str):
         """
         Load a Reader from a recursive directory of .cha files.
         """
         transcriptions = {}
-        for path in Path(dir).rglob("*.cha"):
+        for path in Path(cha_dir).rglob("*.cha"):
             base_dir = Path(*path.parts[1:]).with_suffix("")
             transcription = Transcription.from_path(path)
             transcriptions[base_dir] = transcription
         return cls(transcriptions)
 
-    def dump(
-        self, rttm_dir: str, wav_dir: str, manifest_filepath: str, skip: bool = True
-    ):
+    def save_rttms(self, rttm_dir: str):
         """
-        Dump transcriptions as a folder of .rttms and a manifest .jsonl file
-
-        Assumes that directory of .wav files exists in 'wav_dir' that mirrors original structure of .cha files.
+        Save .rttm files into the given directory.
         """
-        if not manifest_filepath.endswith(".jsonl"):
-            raise ValueError("Manifest file should end with .jsonl")
-
-        Path(manifest_filepath).parent.mkdir(parents=True, exist_ok=True)
-        manifest_file = open(manifest_filepath, "w")
-
         for base_dir, transcription in self.transcriptions.items():
-            audio_filepath = wav_dir / base_dir.with_suffix(".wav")
-
-            if not Path.exists(audio_filepath):
-                if skip:
-                    continue
-                raise ValueError(
-                    f"Can't find audio file {audio_filepath} when saving generating .rttm and manifest files"
-                )
-
             rttm_filepath = rttm_dir / base_dir.with_suffix(".rttm")
             rttm_filepath.parent.mkdir(parents=True, exist_ok=True)
 
             with open(rttm_filepath, "w") as f_out:
                 f_out.write(transcription.to_rttm())
 
-            manifest = transcription.to_manifest(
-                audio_filepath, rttm_filepath, should_exist=True
-            )
-            json.dump(manifest, manifest_file)
+    def to_manifest(self, rttm_dir: str, wav_dir: str, skip=True) -> list[dict]:
+        """
+        Return a list of dictionaries representing the manifest file as used by NeMo
+
+        :param rttm_dir: Directory of .rttm files, should exist
+        :param wav_dir: Diectory of .wav files, should exist
+        :param skip: Whether or not to skip a line of a .rttm of .wav file doesn't exist for it
+        """
+        out = []
+        for base_dir, transcription in self.transcriptions.items():
+            audio_filepath = wav_dir / base_dir.with_suffix(".wav")
+            rttm_filepath = rttm_dir / base_dir.with_suffix(".rttm")
+
+            try:
+                manifest = transcription.to_manifest_entry(
+                    audio_filepath, rttm_filepath, should_exist=True
+                )
+                out.append(manifest)
+            except ValueError as e:
+                if skip:
+                    continue
+                raise e
+
+        return out
+
+    def save_manifest(
+        self, manifest_filepath: str, rttm_dir: str, wav_dir: str, skip: bool = True
+    ):
+        """
+        Save manifest file into the given filepath. Should be called after save_rttms() and should point to its directory for `rttm_dir`
+
+        :param manifest_filepath: Output directory for manifest file
+        :param rttm_dir: Directory of .rttm files, should exist
+        :param wav_dir: Directory of .wav files, should exist
+        :param skip: Whether or not to skip a line if a .rttm or .wav file doesn't exist for it
+        """
+        if not manifest_filepath.endswith(".jsonl"):
+            raise ValueError("Manifest file should end with .jsonl")
+
+        manifest = self.to_manifest(rttm_dir, wav_dir, skip)
+
+        Path(manifest_filepath).parent.mkdir(parents=True, exist_ok=True)
+        manifest_file = open(manifest_filepath, "w")
+        for manifest_entry in manifest:
+            json.dump(manifest_entry, manifest_file)
             manifest_file.write("\n")
         manifest_file.close()
